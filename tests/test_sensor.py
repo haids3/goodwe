@@ -305,6 +305,25 @@ class TestUtils(TestCase):
         self.assertEqual("16:0-22:0 Mon Feb -20% (SoC 75%) On", testee.read(data).__str__())
         data = MockResponse("10001600f902ff38004b0004")
         self.assertEqual("16:0-22:0 Mon Mar -20% (SoC 75%) On", testee.read(data).__str__())
+        self.assertFalse(testee.export_limit)
+
+    def test_eco_mode_v745_export_limit(self):
+        """Month bit 12 marks a discharge slot limiting export, not a 13th month."""
+        testee = Schedule("", 0, "", ScheduleType.ECO_MODE_745)
+
+        data = MockResponse("12001500067f00a0003c1fff")
+        self.assertEqual("18:0-21:0 Sun,Mon,Tue,Wed,Thu,Fri,Sat 16% export (SoC 60%) Off",
+                         testee.read(data).__str__())
+        self.assertTrue(testee.export_limit)
+        self.assertIsNone(testee.months)
+        self.assertEqual(0x1fff, testee.month_bits)
+        self.assertEqual(bytes.fromhex("12001500067f00a0003c1fff"),
+                         testee.encode_value(bytes.fromhex("12001500067f00a0003c1fff")))
+
+        data = MockResponse("12001500f97f01f400321003")
+        self.assertEqual("18:0-21:0 Sun,Mon,Tue,Wed,Thu,Fri,Sat Jan,Feb 50% export (SoC 50%) On",
+                         testee.read(data).__str__())
+        self.assertTrue(testee.export_limit)
 
     def test_peak_shaving_mode(self):
         testee = PeakShavingMode("", 0, "")

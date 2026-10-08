@@ -683,12 +683,15 @@ class Schedule(Sensor, EcoMode):
         self.soc: int | None = None
         self.month_bits: int | None = None
         self.months: str | None = None
+        # Month bit 12: the power limits grid export rather than battery discharge
+        self.export_limit: bool | None = None
         self.schedule_type: ScheduleType = schedule_type
 
     def __str__(self):
         return f"{self.start_h}:{self.start_m}-{self.end_h}:{self.end_m} {self.days} " \
                f"{self.months + ' ' if self.months else ''}" \
-               f"{self.get_power()}{self.get_power_unit()} (SoC {self.soc}%) " \
+               f"{self.get_power()}{self.get_power_unit()}{' export' if self.export_limit else ''} " \
+               f"(SoC {self.soc}%) " \
                f"{'On' if -10 < self.on_off < 0 else 'Off' if 10 > self.on_off >= 0 else 'Unset'}"
 
     def read_value(self, data: ProtocolResponse):
@@ -715,7 +718,8 @@ class Schedule(Sensor, EcoMode):
         if self.soc < 0 or self.soc > 100:
             raise ValueError(f"{self.id_}: SoC value {self.soc} out of range.")
         self.month_bits = read_bytes2_signed(data)
-        self.months = decode_months(self.month_bits)
+        self.export_limit = bool(self.month_bits & EXPORT_LIMIT_MONTH_BIT)
+        self.months = decode_months(self.month_bits & 0x0fff)
         return self
 
     def encode_value(self, value: Any, register_value: bytes = None) -> bytes:
@@ -1023,6 +1027,11 @@ def decode_day_of_week(data: int) -> str:
             days += daynames[0]
         daynames.pop(0)
     return days
+
+
+# Set in a schedule's month bits when its power limits grid export (SEMS+ "GRID"
+# power limit method) instead of battery discharge. It is not a month.
+EXPORT_LIMIT_MONTH_BIT = 0x1000
 
 
 def decode_months(data: int) -> str | None:
