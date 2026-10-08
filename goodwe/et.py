@@ -714,6 +714,9 @@ class ET(Inverter):
         self._READ_MPPT_DATA: ProtocolCommand = self._read_command(0x89E5, 0x3D)
         self._has_eco_mode_v2: bool = True
         self._has_peak_shaving: bool = True
+        # "Work mode 3.0" firmware keeps work_mode at 0 and switches the eco
+        # (TOU) and backup modes on their own enable registers instead.
+        self._has_work_mode_v3: bool = False
         self._has_battery: bool = True
         self._has_battery2: bool = False
         self._has_meter_extended: bool = False
@@ -811,6 +814,22 @@ class ET(Inverter):
         except RequestFailedException:
             logger.debug("Cannot read _has_peak_shaving settings, disabling it.")
             self._has_peak_shaving = False
+
+        # Work mode 3.0 mode enables come with the ARM fw 22 settings
+        self._has_work_mode_v3 = self._has_peak_shaving and await self._read_work_mode_v3_flag()
+
+    async def _read_work_mode_v3_flag(self) -> bool:
+        """Answer if the inverter runs work mode 3.0 firmware (register 36212)"""
+        try:
+            response = await self._read_from_socket(self._read_command(36212, 2))
+        except RequestRejectedException as ex:
+            if ex.message == ILLEGAL_DATA_ADDRESS:
+                logger.debug("Work mode 3.0 flag not supported.")
+            return False
+        except RequestFailedException:
+            logger.debug("Cannot read work mode 3.0 flag.")
+            return False
+        return read_unsigned_int(response.response_data(), 0) == 1
 
     async def read_runtime_data(self) -> dict[str, Any]:
         response = await self._read_from_socket(self._READ_RUNNING_DATA)
@@ -1025,6 +1044,12 @@ class ET(Inverter):
         except ValueError:
             logger.debug("Unknown work_mode value %s", mode_id)
             return None
+        if mode == OperationMode.GENERAL and self._has_work_mode_v3:
+            # Backup and eco can both be on; backup decides grid-outage behaviour
+            if await self.read_setting("backup_mode_enable") == 1:
+                return OperationMode.BACKUP
+            if await self.read_setting("eco_mode_enable") == 1:
+                mode = OperationMode.ECO
         if OperationMode.ECO != mode:
             return mode
         eco_mode = await self.read_setting("eco_mode_1")
@@ -1091,6 +1116,24 @@ class ET(Inverter):
             await self.write_setting("eco_mode_4_switch", 0)
             await self.write_setting("work_mode", 3)
             await self._set_offline(False)
+        await self._set_work_mode_v3_enables(operation_mode)
+
+    async def _set_work_mode_v3_enables(self, operation_mode: OperationMode) -> None:
+        """Make the work mode 3.0 eco (TOU) and backup switches match the mode.
+
+        Backup is written first so that switching to eco never leaves both on.
+        """
+        if not self._has_work_mode_v3:
+            return
+        eco = operation_mode in (
+            OperationMode.ECO,
+            OperationMode.ECO_CHARGE,
+            OperationMode.ECO_DISCHARGE,
+        )
+        await self.write_setting(
+            "backup_mode_enable", int(operation_mode == OperationMode.BACKUP)
+        )
+        await self.write_setting("eco_mode_enable", int(eco))
 
     async def get_ems_mode(self) -> EMSMode:
         mode_id = await self.read_setting("ems_mode")

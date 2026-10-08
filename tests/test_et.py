@@ -1743,3 +1743,81 @@ class GW5K_BT_Test(EtMock):
         self.assertEqual(147, self.arm_svn_version)
         self.assertEqual("04029-03-S10", self.firmware)
         self.assertEqual("02041-11-S00", self.arm_firmware)
+
+
+class WorkModeV3Test(EtMock):
+    """Work mode 3.0 firmware: work_mode stays 0, eco and backup have enables."""
+
+    def __init__(self, methodName="runTest"):
+        EtMock.__init__(self, methodName)
+        self.mock_response(
+            self._READ_DEVICE_VERSION_INFO, "GW10K-ET_device_info_fw819.hex"
+        )
+        self.mock_response(ModbusRtuReadCommand(0xF7, 47547, 6), "eco_mode_v2.hex")
+        self.mock_response(ModbusRtuReadCommand(0xF7, 47589, 6), "eco_mode_v2.hex")
+        self.mock_response(ModbusRtuReadCommand(0xF7, 47000, 1), "register_value_0.hex")
+
+    def _mock_flag(self, filename: str):
+        self.mock_response(ModbusRtuReadCommand(0xF7, 36212, 2), filename)
+        self.loop.run_until_complete(self.read_device_info())
+
+    def _mock_enables(self, backup: str, eco: str):
+        self.mock_response(ModbusRtuReadCommand(0xF7, 47605, 1), backup)
+        self.mock_response(ModbusRtuReadCommand(0xF7, 47612, 1), eco)
+
+    def test_detects_work_mode_v3(self):
+        for filename, expected in (
+            ("work_mode_v3_flag.hex", True),
+            ("work_mode_v3_flag_off.hex", False),
+            (ILLEGAL_DATA_ADDRESS, False),
+        ):
+            with self.subTest(filename=filename):
+                self._mock_flag(filename)
+                self.assertEqual(expected, self._has_work_mode_v3)
+
+    def test_get_operation_mode(self):
+        self._mock_flag("work_mode_v3_flag.hex")
+        for backup, eco, expected in (
+            # Both on: backup decides what happens on a grid outage
+            ("register_value_1.hex", "register_value_1.hex", OperationMode.BACKUP),
+            ("register_value_0.hex", "register_value_1.hex", OperationMode.ECO),
+            ("register_value_0.hex", "register_value_0.hex", OperationMode.GENERAL),
+        ):
+            with self.subTest(backup=backup, eco=eco):
+                self._mock_enables(backup, eco)
+                self.assertEqual(
+                    expected, self.loop.run_until_complete(self.get_operation_mode())
+                )
+
+    def test_get_operation_mode_ignores_enables_without_v3(self):
+        self._mock_flag("work_mode_v3_flag_off.hex")
+        self._mock_enables("register_value_1.hex", "register_value_1.hex")
+        self.assertEqual(
+            OperationMode.GENERAL,
+            self.loop.run_until_complete(self.get_operation_mode()),
+        )
+
+    def test_set_operation_mode_writes_enables(self):
+        self._mock_flag("work_mode_v3_flag.hex")
+        for mode, backup, eco in (
+            (OperationMode.ECO, 0, 1),
+            (OperationMode.ECO_CHARGE, 0, 1),
+            (OperationMode.BACKUP, 1, 0),
+            (OperationMode.GENERAL, 0, 0),
+            (OperationMode.PEAK_SHAVING, 0, 0),
+        ):
+            with self.subTest(mode=mode):
+                self.loop.run_until_complete(self.set_operation_mode(mode))
+                self.assertEqual(
+                    [
+                        self._write_command(47605, backup).request,
+                        self._write_command(47612, eco).request,
+                    ],
+                    self._list_of_requests[-2:],
+                )
+
+    def test_set_operation_mode_without_v3_leaves_enables(self):
+        self._mock_flag("work_mode_v3_flag_off.hex")
+        self.loop.run_until_complete(self.set_operation_mode(OperationMode.ECO))
+        self.assertNotIn(self._write_command(47612, 1).request, self._list_of_requests)
+        self.assertNotIn(self._write_command(47605, 0).request, self._list_of_requests)
