@@ -5,7 +5,7 @@ from unittest import TestCase
 
 from goodwe.et import ET
 from goodwe.exceptions import RequestRejectedException, RequestFailedException
-from goodwe.inverter import OperationMode
+from goodwe.inverter import OperationMode, WorkModeSwitch
 from goodwe.modbus import ILLEGAL_DATA_ADDRESS
 from goodwe.protocol import ModbusRtuReadCommand, ProtocolCommand, ProtocolResponse
 
@@ -1853,3 +1853,166 @@ class WorkModeV3Test(EtMock):
         self.loop.run_until_complete(self.set_operation_mode(OperationMode.ECO))
         self.assertNotIn(self._write_command(47612, 1).request, self._list_of_requests)
         self.assertNotIn(self._write_command(47605, 0).request, self._list_of_requests)
+
+
+class WorkModeSwitchTest(EtMock):
+    """Work mode 3.0 switches; peak shaving and smart charge share group 47589."""
+
+    def __init__(self, methodName="runTest"):
+        EtMock.__init__(self, methodName)
+        self.mock_response(
+            self._READ_DEVICE_VERSION_INFO, "GW10K-ET_device_info_fw819.hex"
+        )
+        self.mock_response(ModbusRtuReadCommand(0xF7, 47547, 6), "eco_mode_v2.hex")
+        self.mock_response(ModbusRtuReadCommand(0xF7, 47589, 6), "eco_mode_v2.hex")
+        self.mock_response(ModbusRtuReadCommand(0xF7, 36212, 2), "work_mode_v3_flag.hex")
+        self._mock_state()
+
+    def setUp(self):
+        self.loop.run_until_complete(self.read_device_info())
+
+    def _mock_state(
+        self,
+        backup: str = "register_value_0.hex",
+        tou: str = "register_value_0.hex",
+        smart_charge: str = "register_value_0.hex",
+        slot: str = "shared_slot_unset.hex",
+    ):
+        self.mock_response(ModbusRtuReadCommand(0xF7, 47605, 1), backup)
+        self.mock_response(ModbusRtuReadCommand(0xF7, 47612, 1), tou)
+        self.mock_response(ModbusRtuReadCommand(0xF7, 47609, 1), smart_charge)
+        self.mock_response(ModbusRtuReadCommand(0xF7, 47591, 1), slot)
+
+    def _set(self, switch: WorkModeSwitch, enabled: bool) -> list:
+        self._list_of_requests.clear()
+        self.loop.run_until_complete(self.set_work_mode_switch(switch, enabled))
+        return self._list_of_requests
+
+    def test_get_switches(self):
+        on = "register_value_1.hex"
+        for state, expected_on in (
+            ({}, ()),
+            ({"backup": on, "tou": on}, (WorkModeSwitch.BACKUP, WorkModeSwitch.TOU)),
+            ({"slot": "shared_slot_peak_shaving_on.hex"}, (WorkModeSwitch.PEAK_SHAVING,)),
+            ({"slot": "shared_slot_peak_shaving_off.hex"}, ()),
+            (
+                {"smart_charge": on, "slot": "shared_slot_smart_charge_on.hex"},
+                (WorkModeSwitch.SMART_CHARGE,),
+            ),
+            # The portal needs both the group and the enable for smart charge
+            ({"slot": "shared_slot_smart_charge_on.hex"}, ()),
+            ({"smart_charge": on, "slot": "shared_slot_smart_charge_off.hex"}, ()),
+        ):
+            with self.subTest(state=state):
+                self._mock_state(**state)
+                self.assertEqual(
+                    {switch: switch in expected_on for switch in WorkModeSwitch},
+                    self.loop.run_until_complete(self.get_work_mode_switches()),
+                )
+
+    def test_get_switches_without_v3(self):
+        self.mock_response(
+            ModbusRtuReadCommand(0xF7, 36212, 2), "work_mode_v3_flag_off.hex"
+        )
+        self.loop.run_until_complete(self.read_device_info())
+        self.assertEqual({}, self.loop.run_until_complete(self.get_work_mode_switches()))
+
+    def test_set_enable_switches_write_only_their_register(self):
+        for switch, register in (
+            (WorkModeSwitch.BACKUP, 47605),
+            (WorkModeSwitch.TOU, 47612),
+        ):
+            for enabled in (True, False):
+                with self.subTest(switch=switch, enabled=enabled):
+                    self.assertEqual(
+                        [self._write_command(register, int(enabled)).request],
+                        self._set(switch, enabled),
+                    )
+
+    def test_set_shared_slot_switches(self):
+        # Only the on/off byte changes; the 0x7f day bits are kept
+        for switch, slot, enabled, expected in (
+            (
+                WorkModeSwitch.PEAK_SHAVING,
+                "shared_slot_peak_shaving_off.hex",
+                True,
+                [self._write_command(47591, 0xFC7F).request],
+            ),
+            (
+                WorkModeSwitch.PEAK_SHAVING,
+                "shared_slot_peak_shaving_on.hex",
+                False,
+                [self._write_command(47591, 0x037F).request],
+            ),
+            (
+                WorkModeSwitch.SMART_CHARGE,
+                "shared_slot_smart_charge_off.hex",
+                True,
+                [
+                    self._write_command(47591, 0xFA7F).request,
+                    self._write_command(47609, 1).request,
+                ],
+            ),
+            (
+                WorkModeSwitch.SMART_CHARGE,
+                "shared_slot_smart_charge_on.hex",
+                False,
+                [
+                    self._write_command(47591, 0x057F).request,
+                    self._write_command(47609, 0).request,
+                ],
+            ),
+        ):
+            with self.subTest(switch=switch, enabled=enabled):
+                self._mock_state(slot=slot)
+                self.assertEqual(expected, self._set(switch, enabled))
+
+    def test_enable_shared_slot_switch_needs_its_schedule(self):
+        for switch, slot in (
+            (WorkModeSwitch.PEAK_SHAVING, "shared_slot_unset.hex"),
+            (WorkModeSwitch.PEAK_SHAVING, "shared_slot_smart_charge_off.hex"),
+            (WorkModeSwitch.SMART_CHARGE, "shared_slot_unset.hex"),
+            (WorkModeSwitch.SMART_CHARGE, "shared_slot_peak_shaving_off.hex"),
+        ):
+            with self.subTest(switch=switch, slot=slot):
+                self._mock_state(slot=slot)
+                with self.assertRaises(ValueError):
+                    self._set(switch, True)
+                self.assertEqual([], self._list_of_requests)
+
+    def test_disable_shared_slot_switch_of_other_type_writes_nothing(self):
+        self._mock_state(slot="shared_slot_smart_charge_on.hex")
+        self.assertEqual([], self._set(WorkModeSwitch.PEAK_SHAVING, False))
+
+    def test_conflicting_switch_is_rejected(self):
+        on = "register_value_1.hex"
+        for switch, state in (
+            (WorkModeSwitch.PEAK_SHAVING, {"backup": on, "slot": "shared_slot_peak_shaving_off.hex"}),
+            (WorkModeSwitch.PEAK_SHAVING, {"tou": on, "slot": "shared_slot_peak_shaving_off.hex"}),
+            (WorkModeSwitch.BACKUP, {"slot": "shared_slot_peak_shaving_on.hex"}),
+            (WorkModeSwitch.TOU, {"slot": "shared_slot_peak_shaving_on.hex"}),
+        ):
+            with self.subTest(switch=switch, state=state):
+                self._mock_state(**state)
+                with self.assertRaises(ValueError):
+                    self._set(switch, True)
+                self.assertEqual([], self._list_of_requests)
+
+    def test_compatible_switches_combine(self):
+        on = "register_value_1.hex"
+        self._mock_state(
+            tou=on, smart_charge=on, slot="shared_slot_smart_charge_on.hex"
+        )
+        self.assertEqual(
+            [self._write_command(47605, 1).request],
+            self._set(WorkModeSwitch.BACKUP, True),
+        )
+
+    def test_set_switch_without_v3_is_rejected(self):
+        self.mock_response(
+            ModbusRtuReadCommand(0xF7, 36212, 2), "work_mode_v3_flag_off.hex"
+        )
+        self.loop.run_until_complete(self.read_device_info())
+        with self.assertRaises(ValueError):
+            self._set(WorkModeSwitch.TOU, True)
+        self.assertEqual([], self._list_of_requests)

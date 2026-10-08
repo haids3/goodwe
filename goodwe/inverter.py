@@ -91,6 +91,25 @@ class OperationMode(IntEnum):
     ECO_DISCHARGE = 99
 
 
+class WorkModeSwitch(Enum):
+    """
+    Independent mode switches of "work mode 3.0" firmware.
+
+    Self-use is always on underneath. Backup, TOU and smart charge can be
+    combined freely, but peak shaving excludes all three of them.
+
+    BACKUP - Backup mode
+    TOU - Time-of-use (eco) schedule groups
+    SMART_CHARGE - Smart (delayed) charging
+    PEAK_SHAVING - Peak shaving
+    """
+
+    BACKUP = "backup"
+    TOU = "tou"
+    SMART_CHARGE = "smart_charge"
+    PEAK_SHAVING = "peak_shaving"
+
+
 class EMSMode(IntEnum):
     """
     Enumeration of EMS modes.
@@ -397,6 +416,25 @@ class Inverter(ABC):
         The modes ECO_CHARGE and ECO_DISCHARGE are not real inverter operation modes, but a convenience
         shortcuts to enter Eco Mode with a single group valid all the time (from 00:00-23:59, Mon-Sun)
         charging or discharging with optional charging power and SoC (%) parameters.
+        """
+        raise NotImplementedError()
+
+    async def get_work_mode_switches(self) -> dict[WorkModeSwitch, bool]:
+        """
+        Answer the state of each work mode switch, or an empty dict
+        when the inverter does not have independent mode switches.
+        """
+        return {}
+
+    async def set_work_mode_switch(self, switch: WorkModeSwitch, enabled: bool) -> None:
+        """
+        BEWARE !!!
+        This method modifies inverter operational parameter.
+        Use with caution and at your own risk !
+
+        Turn a single work mode switch on or off. Only that switch's own
+        registers are written; switching on a mode which conflicts with an
+        active one raises ValueError instead of turning the other one off.
         """
         raise NotImplementedError()
 

@@ -6,7 +6,7 @@ import logging
 
 from .const import *
 from .exceptions import RequestFailedException, RequestRejectedException
-from .inverter import EMSMode, Inverter, OperationMode, SensorKind as Kind
+from .inverter import EMSMode, Inverter, OperationMode, SensorKind as Kind, WorkModeSwitch
 from .modbus import ILLEGAL_DATA_ADDRESS
 from .model import is_2_battery, is_4_mppt, is_745_platform, is_single_phase
 from .protocol import ProtocolCommand
@@ -19,6 +19,34 @@ _WORK_MODE_V3_OPERATION_MODES = (
     OperationMode.BACKUP,
     OperationMode.ECO,
 )
+
+# Mirrors the SEMS+ portal: peak shaving cannot be combined with these
+_WORK_MODE_SWITCH_CONFLICTS = {
+    WorkModeSwitch.BACKUP: (WorkModeSwitch.PEAK_SHAVING,),
+    WorkModeSwitch.TOU: (WorkModeSwitch.PEAK_SHAVING,),
+    WorkModeSwitch.SMART_CHARGE: (WorkModeSwitch.PEAK_SHAVING,),
+    WorkModeSwitch.PEAK_SHAVING: (
+        WorkModeSwitch.BACKUP,
+        WorkModeSwitch.TOU,
+        WorkModeSwitch.SMART_CHARGE,
+    ),
+}
+_WORK_MODE_SWITCH_ENABLES = {
+    WorkModeSwitch.BACKUP: "backup_mode_enable",
+    WorkModeSwitch.TOU: "eco_mode_enable",
+}
+# Peak shaving and smart charge share the peak shaving group (47589); its
+# on/off byte (high byte of 47591) holds the schedule type, negated when on.
+_SHARED_SLOT_MODE_REGISTER = 47591
+_SHARED_SLOT_TYPES = {
+    WorkModeSwitch.PEAK_SHAVING: ScheduleType.PEAK_SHAVING,
+    WorkModeSwitch.SMART_CHARGE: ScheduleType.SMART_CHARGE_MODE,
+}
+
+
+def _slot_on(schedule_type: ScheduleType) -> int:
+    """Answer the signed on/off byte value of an active schedule group"""
+    return -1 - schedule_type
 
 
 class ET(Inverter):
@@ -1157,6 +1185,70 @@ class ET(Inverter):
         )
         await self.write_setting(
             "eco_mode_enable", int(operation_mode == OperationMode.ECO)
+        )
+
+    async def get_work_mode_switches(self) -> dict[WorkModeSwitch, bool]:
+        if not self._has_work_mode_v3:
+            return {}
+        result = {
+            switch: await self.read_setting(setting_id) == 1
+            for switch, setting_id in _WORK_MODE_SWITCH_ENABLES.items()
+        }
+        _, slot_on_off = await self._read_shared_slot_mode()
+        result[WorkModeSwitch.PEAK_SHAVING] = slot_on_off == _slot_on(
+            ScheduleType.PEAK_SHAVING
+        )
+        result[WorkModeSwitch.SMART_CHARGE] = (
+            slot_on_off == _slot_on(ScheduleType.SMART_CHARGE_MODE)
+            and await self.read_setting("smart_charging_enable") == 1
+        )
+        return result
+
+    async def set_work_mode_switch(self, switch: WorkModeSwitch, enabled: bool) -> None:
+        if not self._has_work_mode_v3:
+            raise ValueError("Work mode switches need work mode 3.0 firmware")
+        if enabled:
+            switches = await self.get_work_mode_switches()
+            active = [other for other in _WORK_MODE_SWITCH_CONFLICTS[switch] if switches[other]]
+            if active:
+                raise ValueError(
+                    f"{switch.value} cannot be on together with "
+                    f"{', '.join(other.value for other in active)}"
+                )
+        if switch in _WORK_MODE_SWITCH_ENABLES:
+            await self.write_setting(_WORK_MODE_SWITCH_ENABLES[switch], int(enabled))
+            return
+        await self._set_shared_slot(_SHARED_SLOT_TYPES[switch], enabled)
+        if switch == WorkModeSwitch.SMART_CHARGE:
+            await self.write_setting("smart_charging_enable", int(enabled))
+
+    async def _read_shared_slot_mode(self) -> tuple[int, int]:
+        """Answer the raw mode register and its signed on/off byte"""
+        response = await self._read_from_socket(
+            self._read_command(_SHARED_SLOT_MODE_REGISTER, 1)
+        )
+        raw = read_unsigned_int(response.response_data(), 0)
+        on_off = raw >> 8
+        return raw, on_off - 256 if on_off > 127 else on_off
+
+    async def _set_shared_slot(self, schedule_type: ScheduleType, enabled: bool) -> None:
+        """Flip the shared group's on/off byte, keeping its schedule and days.
+
+        The group's times and power are not written here, so it must already
+        hold a schedule of this type (set up in the app or SEMS+).
+        """
+        raw, on_off = await self._read_shared_slot_mode()
+        if on_off not in (schedule_type, _slot_on(schedule_type)):
+            if not enabled:
+                return
+            raise ValueError(
+                f"The shared schedule group is not set up for {schedule_type.name}"
+            )
+        new_on_off = _slot_on(schedule_type) if enabled else int(schedule_type)
+        await self._read_from_socket(
+            self._write_command(
+                _SHARED_SLOT_MODE_REGISTER, ((new_on_off & 0xFF) << 8) | (raw & 0xFF)
+            )
         )
 
     async def get_ems_mode(self) -> EMSMode:
