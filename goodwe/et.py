@@ -14,6 +14,12 @@ from .sensor import *
 
 logger = logging.getLogger(__name__)
 
+_WORK_MODE_V3_OPERATION_MODES = (
+    OperationMode.GENERAL,
+    OperationMode.BACKUP,
+    OperationMode.ECO,
+)
+
 
 class ET(Inverter):
     """Class representing inverter of ET/EH/BT/BH or GE's GEH families AKA platform 205 or 745"""
@@ -1027,6 +1033,8 @@ class ET(Inverter):
     async def get_operation_modes(
         self, include_emulated: bool
     ) -> tuple[OperationMode, ...]:
+        if self._has_work_mode_v3:
+            return _WORK_MODE_V3_OPERATION_MODES
         result = list(OperationMode)
         if not self._has_peak_shaving:
             result.remove(OperationMode.PEAK_SHAVING)
@@ -1038,18 +1046,14 @@ class ET(Inverter):
         return tuple(result)
 
     async def get_operation_mode(self) -> OperationMode | None:
+        if self._has_work_mode_v3:
+            return await self._get_work_mode_v3_operation_mode()
         mode_id = await self.read_setting("work_mode")
         try:
             mode = OperationMode(mode_id)
         except ValueError:
             logger.debug("Unknown work_mode value %s", mode_id)
             return None
-        if mode == OperationMode.GENERAL and self._has_work_mode_v3:
-            # Backup and eco can both be on; backup decides grid-outage behaviour
-            if await self.read_setting("backup_mode_enable") == 1:
-                return OperationMode.BACKUP
-            if await self.read_setting("eco_mode_enable") == 1:
-                mode = OperationMode.ECO
         if OperationMode.ECO != mode:
             return mode
         eco_mode = await self.read_setting("eco_mode_1")
@@ -1059,11 +1063,30 @@ class ET(Inverter):
             return OperationMode.ECO_DISCHARGE
         return OperationMode.ECO
 
+    async def _get_work_mode_v3_operation_mode(self) -> OperationMode:
+        # Backup and eco can both be on; backup decides grid-outage behaviour
+        if await self.read_setting("backup_mode_enable") == 1:
+            return OperationMode.BACKUP
+        if await self.read_setting("eco_mode_enable") == 1:
+            return OperationMode.ECO
+        return OperationMode.GENERAL
+
     async def set_operation_mode(
         self,
         operation_mode: OperationMode,
         eco_mode_power: int = 100,
         eco_mode_soc: int = 100,
+    ) -> None:
+        if self._has_work_mode_v3:
+            await self._set_work_mode_v3_enables(operation_mode)
+        else:
+            await self._set_work_mode(operation_mode, eco_mode_power, eco_mode_soc)
+
+    async def _set_work_mode(
+        self,
+        operation_mode: OperationMode,
+        eco_mode_power: int,
+        eco_mode_soc: int,
     ) -> None:
         if operation_mode == OperationMode.GENERAL:
             await self.write_setting("work_mode", 0)
@@ -1116,24 +1139,25 @@ class ET(Inverter):
             await self.write_setting("eco_mode_4_switch", 0)
             await self.write_setting("work_mode", 3)
             await self._set_offline(False)
-        await self._set_work_mode_v3_enables(operation_mode)
 
     async def _set_work_mode_v3_enables(self, operation_mode: OperationMode) -> None:
         """Make the work mode 3.0 eco (TOU) and backup switches match the mode.
 
+        Only the two enables are written: the legacy work_mode, EMS (47511-47512)
+        and TOU schedule writes would override this firmware's own settings, and
+        an EMS power set of 0 stops all power flow.
         Backup is written first so that switching to eco never leaves both on.
         """
-        if not self._has_work_mode_v3:
-            return
-        eco = operation_mode in (
-            OperationMode.ECO,
-            OperationMode.ECO_CHARGE,
-            OperationMode.ECO_DISCHARGE,
-        )
+        if operation_mode not in _WORK_MODE_V3_OPERATION_MODES:
+            raise ValueError(
+                f"Operation mode {operation_mode} is not supported on work mode 3.0"
+            )
         await self.write_setting(
             "backup_mode_enable", int(operation_mode == OperationMode.BACKUP)
         )
-        await self.write_setting("eco_mode_enable", int(eco))
+        await self.write_setting(
+            "eco_mode_enable", int(operation_mode == OperationMode.ECO)
+        )
 
     async def get_ems_mode(self) -> EMSMode:
         mode_id = await self.read_setting("ems_mode")

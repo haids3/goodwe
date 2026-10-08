@@ -1789,6 +1789,16 @@ class WorkModeV3Test(EtMock):
                     expected, self.loop.run_until_complete(self.get_operation_mode())
                 )
 
+    def test_get_operation_mode_ignores_work_mode(self):
+        # A legacy work_mode write leaves 47000 non-zero; the enables still decide
+        self._mock_flag("work_mode_v3_flag.hex")
+        self.mock_response(ModbusRtuReadCommand(0xF7, 47000, 1), "register_value_3.hex")
+        self._mock_enables("register_value_0.hex", "register_value_0.hex")
+        self.assertEqual(
+            OperationMode.GENERAL,
+            self.loop.run_until_complete(self.get_operation_mode()),
+        )
+
     def test_get_operation_mode_ignores_enables_without_v3(self):
         self._mock_flag("work_mode_v3_flag_off.hex")
         self._mock_enables("register_value_1.hex", "register_value_1.hex")
@@ -1797,24 +1807,46 @@ class WorkModeV3Test(EtMock):
             self.loop.run_until_complete(self.get_operation_mode()),
         )
 
-    def test_set_operation_mode_writes_enables(self):
+    def test_get_operation_modes(self):
+        self._mock_flag("work_mode_v3_flag.hex")
+        self.assertEqual(
+            (OperationMode.GENERAL, OperationMode.BACKUP, OperationMode.ECO),
+            self.loop.run_until_complete(self.get_operation_modes(True)),
+        )
+
+    def test_set_operation_mode_writes_only_enables(self):
+        # work_mode, EMS mode/power (47511-47512) and the TOU groups stay untouched
         self._mock_flag("work_mode_v3_flag.hex")
         for mode, backup, eco in (
             (OperationMode.ECO, 0, 1),
-            (OperationMode.ECO_CHARGE, 0, 1),
             (OperationMode.BACKUP, 1, 0),
             (OperationMode.GENERAL, 0, 0),
-            (OperationMode.PEAK_SHAVING, 0, 0),
         ):
             with self.subTest(mode=mode):
+                self._list_of_requests.clear()
                 self.loop.run_until_complete(self.set_operation_mode(mode))
                 self.assertEqual(
                     [
                         self._write_command(47605, backup).request,
                         self._write_command(47612, eco).request,
                     ],
-                    self._list_of_requests[-2:],
+                    self._list_of_requests,
                 )
+
+    def test_set_operation_mode_rejects_unsupported_modes(self):
+        self._mock_flag("work_mode_v3_flag.hex")
+        for mode in (
+            OperationMode.OFF_GRID,
+            OperationMode.PEAK_SHAVING,
+            OperationMode.SELF_USE,
+            OperationMode.ECO_CHARGE,
+            OperationMode.ECO_DISCHARGE,
+        ):
+            with self.subTest(mode=mode):
+                self._list_of_requests.clear()
+                with self.assertRaises(ValueError):
+                    self.loop.run_until_complete(self.set_operation_mode(mode))
+                self.assertEqual([], self._list_of_requests)
 
     def test_set_operation_mode_without_v3_leaves_enables(self):
         self._mock_flag("work_mode_v3_flag_off.hex")
