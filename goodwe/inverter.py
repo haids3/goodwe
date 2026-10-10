@@ -516,6 +516,10 @@ class Inverter(ABC):
     def _decode(data: bytes) -> str:
         """Decode the bytes to ascii string"""
         try:
+            # NUL padding after an ASCII string does not make it UTF-16
+            trimmed = data.rstrip(b"\x00")
+            if all(32 <= x < 127 for x in trimmed):
+                return trimmed.decode("ascii").rstrip()
             if any(x < 32 for x in data):
                 return data.decode("utf-16be").rstrip().replace("\x00", "")
             return data.decode("ascii").rstrip()
