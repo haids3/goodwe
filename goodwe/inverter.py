@@ -67,6 +67,40 @@ class Sensor:
         raise NotImplementedError()
 
 
+@dataclass
+class BatteryCluster:
+    """Live readings of one battery cluster (rack) of the first BMS"""
+
+    index: int
+    status: int
+    fault: int
+    soc: float
+    # Negative while charging
+    current: float
+    voltage: float
+    charge_current_limit: float
+    discharge_current_limit: float
+    charged_total: float
+    discharged_total: float
+    max_temperature: float
+    min_temperature: float
+    max_cell_voltage: float
+    min_cell_voltage: float
+
+
+@dataclass
+class BatteryClusterInfo:
+    """Fixed details of one battery cluster (rack) of the first BMS"""
+
+    index: int
+    serial_number: str
+    master_version: int
+    slave_version: int
+    cells_in_series: int
+    soh: float
+    cycles: int
+
+
 class OperationMode(IntEnum):
     """
     Enumeration of operation modes.
@@ -418,6 +452,14 @@ class Inverter(ABC):
         charging or discharging with optional charging power and SoC (%) parameters.
         """
         raise NotImplementedError()
+
+    async def read_battery_clusters(self) -> list[BatteryCluster]:
+        """Read the live data of each battery cluster (rack), if the BMS reports them."""
+        return []
+
+    async def read_battery_cluster_info(self) -> list[BatteryClusterInfo]:
+        """Read the fixed details of each battery cluster (rack), if the BMS reports them."""
+        return []
 
     async def get_work_mode_switches(self) -> dict[WorkModeSwitch, bool]:
         """

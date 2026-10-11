@@ -6,7 +6,15 @@ import logging
 
 from .const import *
 from .exceptions import RequestFailedException, RequestRejectedException
-from .inverter import EMSMode, Inverter, OperationMode, SensorKind as Kind, WorkModeSwitch
+from .inverter import (
+    BatteryCluster,
+    BatteryClusterInfo,
+    EMSMode,
+    Inverter,
+    OperationMode,
+    SensorKind as Kind,
+    WorkModeSwitch,
+)
 from .modbus import ILLEGAL_DATA_ADDRESS
 from .model import is_2_battery, is_4_mppt, is_745_platform, is_single_phase
 from .protocol import ProtocolCommand
@@ -1204,6 +1212,40 @@ class ET(Inverter):
         )
         return result
 
+    async def _battery_cluster_count(self) -> int:
+        """Registered clusters of the first BMS (high byte of 37078; low is online)"""
+        response = await self._read_from_socket(self._read_command(_BMS1_CLUSTER_COUNT, 1))
+        count = response.response_data()[0]
+        return count if count <= _BMS_MAX_CLUSTERS else 0
+
+    async def read_battery_clusters(self) -> list[BatteryCluster]:
+        if not self._has_battery:
+            return []
+        clusters = []
+        for index in range(1, await self._battery_cluster_count() + 1):
+            response = await self._read_from_socket(
+                self._read_command(
+                    _BMS1_CLUSTER_LIVE + (index - 1) * _BMS1_CLUSTER_LIVE_SIZE,
+                    _BMS1_CLUSTER_LIVE_SIZE,
+                )
+            )
+            clusters.append(_decode_battery_cluster(index, response.response_data()))
+        return clusters
+
+    async def read_battery_cluster_info(self) -> list[BatteryClusterInfo]:
+        if not self._has_battery:
+            return []
+        clusters = []
+        for index in range(1, await self._battery_cluster_count() + 1):
+            response = await self._read_from_socket(
+                self._read_command(
+                    _BMS1_CLUSTER_INFO + (index - 1) * _BMS1_CLUSTER_INFO_SIZE,
+                    _BMS1_CLUSTER_INFO_SIZE,
+                )
+            )
+            clusters.append(_decode_battery_cluster_info(index, response.response_data()))
+        return clusters
+
     async def set_work_mode_switch(self, switch: WorkModeSwitch, enabled: bool) -> None:
         if not self._has_work_mode_v3:
             raise ValueError("Work mode switches need work mode 3.0 firmware")
@@ -1299,3 +1341,49 @@ class ET(Inverter):
     async def _set_offline(self, mode: bool) -> None:
         value = bytes.fromhex("00070000") if mode else bytes.fromhex("00010000")
         await self._read_from_socket(self._write_multi_command(0xB997, value))
+
+
+# Battery clusters (racks) of the first BMS: live data from 23000, fixed details
+# from 22000, one block per cluster
+_BMS1_CLUSTER_COUNT = 37078
+_BMS_MAX_CLUSTERS = 15
+_BMS1_CLUSTER_LIVE = 23000
+_BMS1_CLUSTER_LIVE_SIZE = 32
+_BMS1_CLUSTER_INFO = 22000
+_BMS1_CLUSTER_INFO_SIZE = 21
+
+
+def _word(data: bytes, register: int, size: int = 1, signed: bool = False) -> int:
+    return int.from_bytes(data[register * 2:(register + size) * 2], "big", signed=signed)
+
+
+def _decode_battery_cluster(index: int, data: bytes) -> BatteryCluster:
+    return BatteryCluster(
+        index=index,
+        status=_word(data, 0),
+        fault=_word(data, 1),
+        soc=_word(data, 2) / 10,
+        current=_word(data, 3, 2, signed=True) / 100,
+        voltage=_word(data, 5) / 10,
+        charge_current_limit=_word(data, 6) / 10,
+        discharge_current_limit=_word(data, 7) / 10,
+        charged_total=_word(data, 8, 2) / 10,
+        discharged_total=_word(data, 10, 2) / 10,
+        max_temperature=_word(data, 12, signed=True) / 10,
+        min_temperature=_word(data, 13, signed=True) / 10,
+        # Reported in mV
+        max_cell_voltage=_word(data, 14) / 1000,
+        min_cell_voltage=_word(data, 15) / 1000,
+    )
+
+
+def _decode_battery_cluster_info(index: int, data: bytes) -> BatteryClusterInfo:
+    return BatteryClusterInfo(
+        index=index,
+        serial_number=data[0:20].rstrip(b"\x00 ").decode("ascii", errors="replace"),
+        master_version=_word(data, 10),
+        slave_version=_word(data, 11),
+        cells_in_series=_word(data, 12),
+        soh=_word(data, 13) / 10,
+        cycles=_word(data, 18),
+    )

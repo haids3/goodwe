@@ -5,7 +5,7 @@ from unittest import TestCase
 
 from goodwe.et import ET
 from goodwe.exceptions import RequestRejectedException, RequestFailedException
-from goodwe.inverter import OperationMode, WorkModeSwitch
+from goodwe.inverter import BatteryCluster, BatteryClusterInfo, OperationMode, WorkModeSwitch
 from goodwe.modbus import ILLEGAL_DATA_ADDRESS
 from goodwe.protocol import ModbusRtuReadCommand, ProtocolCommand, ProtocolResponse
 
@@ -2016,3 +2016,69 @@ class WorkModeSwitchTest(EtMock):
         with self.assertRaises(ValueError):
             self._set(WorkModeSwitch.TOU, True)
         self.assertEqual([], self._list_of_requests)
+
+
+class BatteryClusterTest(EtMock):
+    """Battery clusters (racks) of the first BMS, from the 22000/23000 blocks."""
+
+    def __init__(self, methodName="runTest"):
+        EtMock.__init__(self, methodName)
+        self.mock_response(ModbusRtuReadCommand(0xF7, 37078, 1), "battery_cluster_count.hex")
+        self.mock_response(ModbusRtuReadCommand(0xF7, 23000, 32), "battery_cluster_1.hex")
+        self.mock_response(ModbusRtuReadCommand(0xF7, 23032, 32), "battery_cluster_2.hex")
+        self.mock_response(ModbusRtuReadCommand(0xF7, 22000, 21), "battery_cluster_info_1.hex")
+        self.mock_response(ModbusRtuReadCommand(0xF7, 22021, 21), "battery_cluster_info_2.hex")
+
+    def test_read_battery_clusters(self):
+        clusters = self.loop.run_until_complete(self.read_battery_clusters())
+        self.assertEqual(
+            [
+                BatteryCluster(
+                    index=1, status=3, fault=0, soc=88.1, current=-13.72, voltage=88.1,
+                    charge_current_limit=93.0, discharge_current_limit=107.0,
+                    charged_total=1234.5, discharged_total=678.9,
+                    max_temperature=27.0, min_temperature=25.0,
+                    max_cell_voltage=3.383, min_cell_voltage=3.379,
+                ),
+                BatteryCluster(
+                    index=2, status=2, fault=4, soc=45.2, current=12.1, voltage=86.4,
+                    charge_current_limit=85.0, discharge_current_limit=107.0,
+                    charged_total=10.0, discharged_total=20.0,
+                    max_temperature=-1.5, min_temperature=-3.0,
+                    max_cell_voltage=3.301, min_cell_voltage=3.29,
+                ),
+            ],
+            clusters,
+        )
+
+    def test_read_battery_cluster_info(self):
+        info = self.loop.run_until_complete(self.read_battery_cluster_info())
+        self.assertEqual(
+            [
+                BatteryClusterInfo(
+                    index=1, serial_number="SYNTHRACK0001", master_version=7,
+                    slave_version=8, cells_in_series=26, soh=100.0, cycles=42,
+                ),
+                BatteryClusterInfo(
+                    index=2, serial_number="SYNTHRACK0002", master_version=7,
+                    slave_version=9, cells_in_series=26, soh=98.5, cycles=7,
+                ),
+            ],
+            info,
+        )
+
+    def test_no_clusters(self):
+        self.mock_response(
+            ModbusRtuReadCommand(0xF7, 37078, 1), "battery_cluster_count_none.hex"
+        )
+        self.assertEqual([], self.loop.run_until_complete(self.read_battery_clusters()))
+
+    def test_no_battery(self):
+        self._has_battery = False
+        self.assertEqual([], self.loop.run_until_complete(self.read_battery_clusters()))
+        self.assertEqual([], self.loop.run_until_complete(self.read_battery_cluster_info()))
+
+    def test_not_supported(self):
+        self.mock_response(ModbusRtuReadCommand(0xF7, 37078, 1), ILLEGAL_DATA_ADDRESS)
+        with self.assertRaises(RequestRejectedException):
+            self.loop.run_until_complete(self.read_battery_clusters())
