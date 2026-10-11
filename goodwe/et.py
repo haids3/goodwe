@@ -604,6 +604,8 @@ class ET(Inverter):
         ),
         Integer("grid_export", 47509, "Grid Export Limit Enabled", "", Kind.GRID),
         Integer("grid_export_limit", 47510, "Grid Export Limit", "W", Kind.GRID),
+        # "On-grid point rated protection" in the GoodWe apps
+        Integer("grid_input_current_limit", 45309, "Grid Input Current Limit", "A", Kind.GRID),
         Integer("ems_mode", 47511, "EMS Mode"),
         Integer("ems_power_limit", 47512, "EMS Power Limit", "W"),
         Integer("battery_protocol_code", 47514, "Battery Protocol Code", "", Kind.BAT),
