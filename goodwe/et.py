@@ -712,9 +712,15 @@ class ET(Inverter):
     __settings_arm_fw_22: tuple[Sensor, ...] = (
         Long("peak_shaving_power_limit", 47542, "Peak Shaving Power Limit"),
         Integer("peak_shaving_soc", 47544, "Peak Shaving SoC"),
-        # EcoModeV2("eco_modeV2_5", 47571, "Eco Mode Version 2 Power Group 5"),
-        # EcoModeV2("eco_modeV2_6", 47577, "Eco Mode Version 2 Power Group 6"),
-        # EcoModeV2("eco_modeV2_7", 47583, "Eco Mode Version 2 Power Group 7"),
+        EcoModeV2("eco_mode_5", 47571, "Eco Mode Group 5"),
+        ByteH("eco_mode_5_switch", 47573, "Eco Mode Group 5 Switch"),
+        EcoModeV2("eco_mode_6", 47577, "Eco Mode Group 6"),
+        ByteH("eco_mode_6_switch", 47579, "Eco Mode Group 6 Switch"),
+        EcoModeV2("eco_mode_7", 47583, "Eco Mode Group 7"),
+        ByteH("eco_mode_7_switch", 47585, "Eco Mode Group 7 Switch"),
+        # Group 8 follows the second peak shaving/smart charge group (47834)
+        EcoModeV2("eco_mode_8", 47840, "Eco Mode Group 8"),
+        ByteH("eco_mode_8_switch", 47842, "Eco Mode Group 8 Switch"),
         PeakShavingMode("peak_shaving_mode", 47589, "Peak Shaving Mode"),
         Integer("dod_holding", 47602, "DoD Holding", "", Kind.BAT),
         Integer("backup_mode_enable", 47605, "Backup Mode Switch"),
@@ -780,6 +786,11 @@ class ET(Inverter):
     def _not_extended_meter2(s: Sensor) -> bool:
         """Filter to exclude extended meter sensors"""
         return s.offset < 36058
+
+    @property
+    def has_work_mode_v3(self) -> bool:
+        """Answer whether the firmware has work mode 3.0 (per-mode switches, 8 eco mode groups)"""
+        return self._has_work_mode_v3
 
     async def read_device_info(self):
         response = await self._read_from_socket(self._READ_DEVICE_VERSION_INFO)
