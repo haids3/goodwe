@@ -460,11 +460,18 @@ class GW10K_ET_fw1023_Test(EtMock):
         self.assertEqual("02041-23-S00", self.arm_firmware)
 
     def test_GW10K_ET_setting_fw1023(self):
-        self.assertEqual(85, len(self.settings()))
+        self.assertEqual(93, len(self.settings()))
         settings = {s.id_: s for s in self.settings()}
         self.assertEqual(
             "PeakShavingMode", type(settings.get("peak_shaving_mode")).__name__
         )
+        # Groups 1-7 are consecutive; group 8 follows the second shared group
+        for group, offset in ((5, 47571), (6, 47577), (7, 47583), (8, 47840)):
+            with self.subTest(group=group):
+                self.assertEqual(offset, settings[f"eco_mode_{group}"].offset)
+                self.assertEqual(
+                    offset + 2, settings[f"eco_mode_{group}_switch"].offset
+                )
 
     def test_GW10K_ET_runtime_data_fw1023(self):
         # Reset sensors
@@ -1775,7 +1782,7 @@ class WorkModeV3Test(EtMock):
         ):
             with self.subTest(filename=filename):
                 self._mock_flag(filename)
-                self.assertEqual(expected, self._has_work_mode_v3)
+                self.assertEqual(expected, self.has_work_mode_v3)
 
     def test_get_operation_mode(self):
         self._mock_flag("work_mode_v3_flag.hex")
