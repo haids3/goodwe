@@ -1877,11 +1877,13 @@ class WorkModeSwitchTest(EtMock):
         tou: str = "register_value_0.hex",
         smart_charge: str = "register_value_0.hex",
         slot: str = "shared_slot_unset.hex",
+        slot2: str = "shared_slot_unset.hex",
     ):
         self.mock_response(ModbusRtuReadCommand(0xF7, 47605, 1), backup)
         self.mock_response(ModbusRtuReadCommand(0xF7, 47612, 1), tou)
         self.mock_response(ModbusRtuReadCommand(0xF7, 47609, 1), smart_charge)
         self.mock_response(ModbusRtuReadCommand(0xF7, 47591, 1), slot)
+        self.mock_response(ModbusRtuReadCommand(0xF7, 47836, 1), slot2)
 
     def _set(self, switch: WorkModeSwitch, enabled: bool) -> list:
         self._list_of_requests.clear()
@@ -1902,6 +1904,13 @@ class WorkModeSwitchTest(EtMock):
             # The portal needs both the group and the enable for smart charge
             ({"slot": "shared_slot_smart_charge_on.hex"}, ()),
             ({"smart_charge": on, "slot": "shared_slot_smart_charge_off.hex"}, ()),
+            # The portal may put either mode in the second group
+            (
+                {"smart_charge": on, "slot2": "shared_slot_smart_charge_on.hex"},
+                (WorkModeSwitch.SMART_CHARGE,),
+            ),
+            ({"slot2": "shared_slot_peak_shaving_on.hex"}, (WorkModeSwitch.PEAK_SHAVING,)),
+            ({"slot2": ILLEGAL_DATA_ADDRESS}, ()),
         ):
             with self.subTest(state=state):
                 self._mock_state(**state)
@@ -1966,6 +1975,19 @@ class WorkModeSwitchTest(EtMock):
             with self.subTest(switch=switch, enabled=enabled):
                 self._mock_state(slot=slot)
                 self.assertEqual(expected, self._set(switch, enabled))
+
+    def test_set_shared_slot_switch_in_second_group(self):
+        self._mock_state(
+            slot="shared_slot_peak_shaving_off.hex",
+            slot2="shared_slot_smart_charge_off.hex",
+        )
+        self.assertEqual(
+            [
+                self._write_command(47836, 0xFA7F).request,
+                self._write_command(47609, 1).request,
+            ],
+            self._set(WorkModeSwitch.SMART_CHARGE, True),
+        )
 
     def test_enable_shared_slot_switch_needs_its_schedule(self):
         for switch, slot in (
