@@ -18,6 +18,7 @@ class EtMock(TestCase, ET):
         self.sensor_map = {s.id_: s for s in self.sensors()}
         self._mock_responses = {}
         self._list_of_requests = []
+        self._list_of_commands = []
 
     def mock_response(self, command: ProtocolCommand, filename: str):
         self._mock_responses[command] = filename
@@ -39,6 +40,7 @@ class EtMock(TestCase, ET):
         else:
             self.request = command.request
             self._list_of_requests.append(command.request)
+            self._list_of_commands.append(command)
             return ProtocolResponse(
                 bytes.fromhex("aa55f700010203040506070809"), command
             )
@@ -1975,6 +1977,17 @@ class WorkModeSwitchTest(EtMock):
             with self.subTest(switch=switch, enabled=enabled):
                 self._mock_state(slot=slot)
                 self.assertEqual(expected, self._set(switch, enabled))
+
+    def test_shared_slot_writes_match_their_signed_echo(self):
+        # The write response echoes the value signed; an unsigned 0xFA7F
+        # would not match it and the write would be reported as rejected
+        self._mock_state(slot2="shared_slot_smart_charge_off.hex")
+        self._list_of_commands.clear()
+        self._set(WorkModeSwitch.SMART_CHARGE, True)
+        self.assertEqual(
+            [(47836, -0x0581), (47609, 1)],
+            [(command.first_address, command.value) for command in self._list_of_commands],
+        )
 
     def test_set_shared_slot_switch_in_second_group(self):
         self._mock_state(

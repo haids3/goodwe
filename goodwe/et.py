@@ -1292,11 +1292,10 @@ class ET(Inverter):
         for register, raw, on_off in await self._read_shared_slot_modes():
             if on_off in (schedule_type, _slot_on(schedule_type)):
                 new_on_off = _slot_on(schedule_type) if enabled else int(schedule_type)
-                await self._read_from_socket(
-                    self._write_command(
-                        register, ((new_on_off & 0xFF) << 8) | (raw & 0xFF)
-                    )
-                )
+                value = ((new_on_off & 0xFF) << 8) | (raw & 0xFF)
+                # Responses echo the value signed, so it must be sent signed
+                value = int.from_bytes(value.to_bytes(2, "big"), "big", signed=True)
+                await self._read_from_socket(self._write_command(register, value))
                 return
         if enabled:
             raise ValueError(
